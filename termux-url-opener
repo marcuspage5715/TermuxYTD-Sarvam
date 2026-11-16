@@ -94,8 +94,13 @@ COMMON=(
   --retry-sleep 5
   --concurrent-fragments "$FRAGMENTS"
   --merge-output-format "$MERGE_FORMAT"
-  --newline
+  --progress-delta 1
 )
+# On a terminal, yt-dlp's \r progress bar redraws one line — leave --newline off
+# so it stays one line. Only switch to newline mode when output is redirected.
+if [ ! -t 1 ]; then
+  COMMON+=( --newline )
+fi
 if [ "$USE_INTERNAL_TEMP" = "1" ]; then
   mkdir -p "$TMPDIR_YT"
   COMMON+=( --paths "temp:$TMPDIR_YT" )
@@ -118,6 +123,16 @@ run_download() {
   rc=${PIPESTATUS[0]}
   end=$(date +%s)
   secs=$((end - start))
+
+  # The progress bar uses \r, which makes the log one huge line. Convert it and
+  # keep only the last progress tick of each run so the log stays readable.
+  if [ -s "$LOGFILE" ]; then
+    tr '\r' '\n' < "$LOGFILE" | awk '
+      /^\[download\] +[0-9.]+%/ { last = $0; next }
+      { if (last != "") { print last; last = "" } print }
+      END { if (last != "") print last }
+    ' > "$LOGFILE.tmp" && mv "$LOGFILE.tmp" "$LOGFILE"
+  fi
 
   echo
   say " ── yt-dlp exited with code $rc after ${secs}s ──" "$C_CYN"
