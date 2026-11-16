@@ -18,6 +18,10 @@ MERGE_FORMAT="mp4/mkv"     # mp4 if possible, mkv otherwise
 FRAGMENTS=4                # parallel fragments (raise to 8 on good Wi-Fi)
 MAX_ATTEMPTS=3             # 1 try + 2 automatic retries
 RETRY_WAITS="30 120 300"   # seconds to wait before retry 1, 2, 3
+VERIFY_OUTPUT=1            # 1 = inspect the finished file with ffprobe
+DURFILE="$HOME/.ytdl-expected-duration"
+PATHFILE="$HOME/.ytdl-last-file"
+EXPECT_VIDEO=1             # set to 0 for audio-only downloads
 # ----------------------------------------------
 
 # Errors that no amount of retrying will fix: bad format, private/removed video,
@@ -80,6 +84,13 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   fi
 fi
 
+# ffprobe ships with the ffmpeg package and is what checks the finished file.
+if [ "$VERIFY_OUTPUT" = "1" ] && ! command -v ffprobe >/dev/null 2>&1; then
+  say "ffprobe is missing — the finished file will not be verified." "$C_YEL"
+  say "It comes with ffmpeg:  pkg install -y ffmpeg" "$C_YEL"
+  VERIFY_OUTPUT=0
+fi
+
 mkdir -p "$OUTDIR" 2>/dev/null || {
   say "Cannot create $OUTDIR — run 'termux-setup-storage' and allow storage." "$C_RED"
   pause_exit 4
@@ -101,6 +112,8 @@ COMMON=(
   --concurrent-fragments "$FRAGMENTS"
   --merge-output-format "$MERGE_FORMAT"
   --progress-delta 1
+  --print-to-file "duration" "$DURFILE"
+  --print-to-file "after_move:filepath" "$PATHFILE"
 )
 # On a terminal, yt-dlp's \r progress bar redraws one line — leave --newline off
 # so it stays one line. Only switch to newline mode when output is redirected.
@@ -124,6 +137,77 @@ tidy_log() {
   ' > "$LOGFILE.tmp" && mv "$LOGFILE.tmp" "$LOGFILE"
 }
 
+# ---------- verification ----------
+fmt_dur() {  # seconds -> h:mm:ss
+  awk -v s="$1" 'BEGIN {
+    if (s == "" || s == "NA") { print "?"; exit }
+    printf "%d:%02d:%02d", int(s / 3600), int((s % 3600) / 60), int(s % 60)
+  }'
+}
+
+# Confirms the merged file is really complete: both streams present and the
+# duration matching what yt-dlp said the source was. A truncated merge can still
+# play for a few minutes, so exit code 0 alone is not proof.
+verify_output() {
+  local expect_video="$1" file expected actual vcodec acodec vres vrc newest
+
+  file=$(tail -n 1 "$PATHFILE" 2>/dev/null)
+  if [ -z "$file" ] || [ ! -f "$file" ]; then
+    newest=$(ls -t "$OUTDIR" 2>/dev/null | grep -viE '\.(part|ytdl|temp)$' | head -n 1)
+    [ -n "$newest" ] && file="$OUTDIR/$newest"
+  fi
+  if [ -z "$file" ] || [ ! -f "$file" ]; then
+    say " ? Could not find the output file to verify." "$C_YEL"
+    return 2
+  fi
+
+  acodec=$(ffprobe -v error -select_streams a:0 -show_entries stream=codec_name \
+    -of default=nw=1:nk=1 "$file" 2>/dev/null)
+  vcodec=$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name \
+    -of default=nw=1:nk=1 "$file" 2>/dev/null)
+  vres=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height \
+    -of csv=s=x:p=0 "$file" 2>/dev/null)
+  actual=$(ffprobe -v error -show_entries format=duration \
+    -of default=nw=1:nk=1 "$file" 2>/dev/null)
+  expected=$(head -n 1 "$DURFILE" 2>/dev/null)
+
+  say " ✔ File  : $(basename "$file")" "$C_GRN"
+  say "   Size  : $(du -h "$file" 2>/dev/null | cut -f1)" "$C_GRN"
+
+  vrc=0
+  if [ -n "$vcodec" ]; then
+    say "   Video : $vcodec ${vres:+($vres)}" "$C_GRN"
+  elif [ "$expect_video" = "1" ]; then
+    say " ✖ No video stream in the output file." "$C_RED"
+    vrc=1
+  fi
+  if [ -n "$acodec" ]; then
+    say "   Audio : $acodec" "$C_GRN"
+  else
+    say " ✖ No audio stream in the output file." "$C_RED"
+    vrc=1
+  fi
+
+  if printf '%s' "$actual" | grep -qE '^[0-9]+(\.[0-9]+)?$' &&
+     printf '%s' "$expected" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+    if awk -v a="$actual" -v e="$expected" 'BEGIN {
+         # 1% of the source length, never less than 3s: tight enough to catch a
+         # truncated tail, loose enough to ignore container rounding.
+         tol = e * 0.01
+         if (tol < 3) tol = 3
+         exit !(((a - e) < 0 ? e - a : a - e) <= tol) }'; then
+      say "   Length: $(fmt_dur "$actual") — matches the source" "$C_GRN"
+    else
+      say " ✖ Length: $(fmt_dur "$actual") but the source is $(fmt_dur "$expected") — truncated." "$C_RED"
+      vrc=1
+    fi
+  else
+    say "   Length: $(fmt_dur "$actual") (source length unknown, not compared)" "$C_YEL"
+  fi
+
+  return "$vrc"
+}
+
 # ---------- downloader ----------
 run_download() {
   local -a args=("${COMMON[@]}" "$@")
@@ -138,6 +222,8 @@ run_download() {
 
   total_start=$(date +%s)
   : > "$LOGFILE"
+  : > "$DURFILE"
+  : > "$PATHFILE"
 
   while : ; do
     if [ "$attempt" -gt 1 ]; then
@@ -184,13 +270,26 @@ run_download() {
   say " ── yt-dlp exited with code $rc after ${total}s ──" "$C_CYN"
 
   if [ "$rc" -eq 0 ]; then
-    local newest
-    newest=$(ls -t "$OUTDIR" 2>/dev/null | grep -viE '\.(part|ytdl|temp)$' | head -n 1)
-    if [ -n "$newest" ]; then
-      say " ✔ Saved: $newest" "$C_GRN"
-      say "   Size : $(du -h "$OUTDIR/$newest" 2>/dev/null | cut -f1)" "$C_GRN"
+    local vrc=0 newest
+    if [ "$VERIFY_OUTPUT" = "1" ]; then
+      verify_output "$EXPECT_VIDEO"
+      vrc=$?
+    else
+      vrc=3
+      newest=$(ls -t "$OUTDIR" 2>/dev/null | grep -viE '\.(part|ytdl|temp)$' | head -n 1)
+      if [ -n "$newest" ]; then
+        say " ✔ Saved: $newest" "$C_GRN"
+        say "   Size : $(du -h "$OUTDIR/$newest" 2>/dev/null | cut -f1)" "$C_GRN"
+      fi
     fi
-    say " ✔ DOWNLOAD COMPLETE." "$C_GRN"
+    case "$vrc" in
+      0) say " ✔ DOWNLOAD COMPLETE — verified with ffprobe." "$C_GRN" ;;
+      1) say " ✖ DOWNLOAD FINISHED, BUT VERIFICATION FAILED — the file may be incomplete." "$C_RED"
+         say "   Delete it and share the video again; the download resumes from what is left." "$C_YEL"
+         rc=5 ;;
+      3) say " ✔ DOWNLOAD COMPLETE (verification off)." "$C_GRN" ;;
+      *) say " ? DOWNLOAD COMPLETE (could not verify)." "$C_YEL" ;;
+    esac
   else
     say " ✖ DOWNLOAD FAILED (exit $rc). Nothing was merged." "$C_RED"
     say "   Last lines of the log:" "$C_YEL"
@@ -229,6 +328,7 @@ pick_video() {
 
 case "$choice" in
   1)
+    EXPECT_VIDEO=0
     run_download -f "ba/b" -x --audio-format mp3 --audio-quality 0 \
       --embed-thumbnail --embed-metadata --convert-thumbnails jpg "$URL"
     ;;

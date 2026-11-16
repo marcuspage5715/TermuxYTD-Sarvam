@@ -20,6 +20,10 @@ This is a fork of [khansaad1275/Termux-YTD2.0](https://github.com/khansaad1275/T
   script retries up to 3 times with backoff (30 s, 2 min, 5 min), resuming from the partial file
   each time. Errors that retrying cannot fix — bad format, private or removed video, bot check —
   stop immediately instead of wasting your time.
+- **Every download is verified with ffprobe.** After the merge, the script checks that the output
+  has both a video and an audio stream and that its length matches the source (within 1%). A merge
+  that got truncated can still play for a few minutes, so `DOWNLOAD COMPLETE` used to be a guess;
+  now it says `verified with ffprobe` or fails with `VERIFICATION FAILED`.
 - **Fixed the broken default branch** (`-o $path` typo), the stray `break`, unquoted variables,
   missing `--no-playlist`, and the silent overwrite of an existing `termux-url-opener`.
 
@@ -63,6 +67,12 @@ chosen quality is the problem, not the connection — pick a lower quality or "B
 says "Giving up after 3 attempts", the connection was down for the whole backoff window; just share
 the video again and it resumes from the partial file. Tune `MAX_ATTEMPTS` and `RETRY_WAITS` at the
 top of `termux-url-opener` if you want more patience.
+
+**It says `VERIFICATION FAILED`.**
+The file downloaded but its length does not match the source, or a stream is missing — usually a
+merge that got cut off by a full disk or a killed session. Delete that one file and share the video
+again; yt-dlp resumes from what is left. If it fails the same way twice, the target filesystem is
+the likely culprit (see the 4 GB entry below).
 
 **The download dies at exactly 4 GB.**
 `~/storage/shared` is on a FAT32 volume, which cannot hold a single file larger than 4 GiB. Check
