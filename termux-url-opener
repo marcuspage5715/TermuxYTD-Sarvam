@@ -16,7 +16,13 @@ TMPDIR_YT="$HOME/.cache/ytdlp"
 USE_INTERNAL_TEMP=0        # 1 = download fragments in internal storage, then move
 MERGE_FORMAT="mp4/mkv"     # mp4 if possible, mkv otherwise
 FRAGMENTS=4                # parallel fragments (raise to 8 on good Wi-Fi)
+MAX_ATTEMPTS=3             # 1 try + 2 automatic retries
+RETRY_WAITS="30 120 300"   # seconds to wait before retry 1, 2, 3
 # ----------------------------------------------
+
+# Errors that no amount of retrying will fix: bad format, private/removed video,
+# bot check, bad URL. Anything else is treated as transient and retried.
+FATAL_PATTERNS='Requested format is not available|Sign in to confirm|Private video|Video unavailable|This video is not available|members-only|Unsupported URL|not a valid URL|No video formats found|Incomplete YouTube ID|HTTP Error 404'
 
 FTEMPLATE="$OUTDIR/%(title).150B [%(id)s].%(ext)s"
 
@@ -106,40 +112,80 @@ if [ "$USE_INTERNAL_TEMP" = "1" ]; then
   COMMON+=( --paths "temp:$TMPDIR_YT" )
 fi
 
+# ---------- log helper ----------
+tidy_log() {
+  # The progress bar uses \r, which makes the log one huge line. Convert it and
+  # keep only the last progress tick of each run so the log stays readable.
+  [ -s "$LOGFILE" ] || return 0
+  tr '\r' '\n' < "$LOGFILE" | awk '
+    /^\[download\] +[0-9.]+%/ { last = $0; next }
+    { if (last != "") { print last; last = "" } print }
+    END { if (last != "") print last }
+  ' > "$LOGFILE.tmp" && mv "$LOGFILE.tmp" "$LOGFILE"
+}
+
 # ---------- downloader ----------
 run_download() {
   local -a args=("${COMMON[@]}" "$@")
-  local rc start end secs
+  local -a waits=($RETRY_WAITS)
+  local rc=0 attempt=1 wait_secs start end secs total total_start fatal
+  local attempt_log="$LOGFILE.attempt"
 
   echo
   say " ▶ yt-dlp ${args[*]}" "$C_CYN"
   say " ▶ saving to: $OUTDIR" "$C_CYN"
   say " ▶ log: $LOGFILE" "$C_CYN"
-  echo
 
-  start=$(date +%s)
+  total_start=$(date +%s)
   : > "$LOGFILE"
-  yt-dlp "${args[@]}" 2>&1 | tee -a "$LOGFILE"
-  rc=${PIPESTATUS[0]}
-  end=$(date +%s)
-  secs=$((end - start))
 
-  # The progress bar uses \r, which makes the log one huge line. Convert it and
-  # keep only the last progress tick of each run so the log stays readable.
-  if [ -s "$LOGFILE" ]; then
-    tr '\r' '\n' < "$LOGFILE" | awk '
-      /^\[download\] +[0-9.]+%/ { last = $0; next }
-      { if (last != "") { print last; last = "" } print }
-      END { if (last != "") print last }
-    ' > "$LOGFILE.tmp" && mv "$LOGFILE.tmp" "$LOGFILE"
-  fi
+  while : ; do
+    if [ "$attempt" -gt 1 ]; then
+      say " ↻ attempt ${attempt} of ${MAX_ATTEMPTS}" "$C_YEL"
+    fi
+    echo "=== attempt ${attempt} $(date '+%Y-%m-%d %H:%M:%S') ===" >> "$LOGFILE"
+
+    : > "$attempt_log"
+    start=$(date +%s)
+    yt-dlp "${args[@]}" 2>&1 | tee -a "$LOGFILE" "$attempt_log"
+    rc=${PIPESTATUS[0]}
+    end=$(date +%s); secs=$((end - start))
+
+    # Judge only this attempt's output, then tidy the accumulated log.
+    fatal=0
+    if [ "$rc" -ne 0 ] && grep -qEi "$FATAL_PATTERNS" "$attempt_log" 2>/dev/null; then
+      fatal=1
+    fi
+    tidy_log
+
+    [ "$rc" -eq 0 ] && break
+
+    if [ "$fatal" -eq 1 ]; then
+      say " ✖ Permanent error (bad format, private or unavailable video, bot check)." "$C_RED"
+      say "   Retrying would give the same result, so it stops here." "$C_YEL"
+      break
+    fi
+    if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+      say " ✖ Giving up after ${attempt} attempt(s)." "$C_RED"
+      break
+    fi
+
+    wait_secs=${waits[$((attempt - 1))]:-300}
+    say " ⏳ Failed after ${secs}s — retrying in ${wait_secs}s (attempt $((attempt + 1)) of ${MAX_ATTEMPTS})." "$C_YEL"
+    say "    Partial data is kept, so the retry resumes where it stopped. Ctrl-C to stop." "$C_YEL"
+    sleep "$wait_secs"
+    attempt=$((attempt + 1))
+  done
+
+  total=$(( $(date +%s) - total_start ))
+  rm -f "$attempt_log"
 
   echo
-  say " ── yt-dlp exited with code $rc after ${secs}s ──" "$C_CYN"
+  say " ── yt-dlp exited with code $rc after ${total}s ──" "$C_CYN"
 
   if [ "$rc" -eq 0 ]; then
     local newest
-    newest=$(ls -t "$OUTDIR" 2>/dev/null | head -n 1)
+    newest=$(ls -t "$OUTDIR" 2>/dev/null | grep -viE '\.(part|ytdl|temp)$' | head -n 1)
     if [ -n "$newest" ]; then
       say " ✔ Saved: $newest" "$C_GRN"
       say "   Size : $(du -h "$OUTDIR/$newest" 2>/dev/null | cut -f1)" "$C_GRN"

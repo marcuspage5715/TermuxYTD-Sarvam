@@ -16,6 +16,10 @@ This is a fork of [khansaad1275/Termux-YTD2.0](https://github.com/khansaad1275/T
 - **You can tell when a download is finished.** The script reports yt-dlp's exit code, prints
   `DOWNLOAD COMPLETE` with the file name and size (or `DOWNLOAD FAILED` with the log tail), and
   keeps a full log at `~/ytdl-last.log`.
+- **Automatic retries.** A dropped connection no longer means coming back to restart by hand. The
+  script retries up to 3 times with backoff (30 s, 2 min, 5 min), resuming from the partial file
+  each time. Errors that retrying cannot fix — bad format, private or removed video, bot check —
+  stop immediately instead of wasting your time.
 - **Fixed the broken default branch** (`-o $path` typo), the stray `break`, unquoted variables,
   missing `--no-playlist`, and the silent overwrite of an existing `termux-url-opener`.
 
@@ -51,6 +55,14 @@ Every download is merged into a single file. The last log is always at `~/ytdl-l
 ffmpeg is missing. Run `pkg install -y ffmpeg` and check with `ffmpeg -version`. The current
 `termux-url-opener` refuses to start a download when ffmpeg is absent, so you should see a clear
 message instead of a split file.
+
+**The download stopped by itself.**
+Read the last lines the script prints, or `tail -n 30 ~/ytdl-last.log`. If it says "retrying in", it
+handled a network error on its own and carried on. If it says "Permanent error", the video or the
+chosen quality is the problem, not the connection — pick a lower quality or "Best available". If it
+says "Giving up after 3 attempts", the connection was down for the whole backoff window; just share
+the video again and it resumes from the partial file. Tune `MAX_ATTEMPTS` and `RETRY_WAITS` at the
+top of `termux-url-opener` if you want more patience.
 
 **The download dies at exactly 4 GB.**
 `~/storage/shared` is on a FAT32 volume, which cannot hold a single file larger than 4 GiB. Check
