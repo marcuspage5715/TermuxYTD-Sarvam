@@ -1,0 +1,180 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# ytd-compat — make a downloaded video play smoothly on an Android phone.
+#
+# Why this exists: best-quality yt-dlp downloads are often AV1 or VP9, sometimes
+# 10-bit or 4:4:4. Many Android players cannot hardware-decode those, so playback
+# stutters. This converts the file to H.264 High / yuv420p / AAC in MP4, which
+# every Android device decodes in hardware.
+#
+# Usage:
+#   ytd-compat <file>              convert (or remux, if that is enough)
+#   ytd-compat <file> -o <out>     choose the output name
+#   ytd-compat --check <file>      only report what the file contains
+#
+# Re-encoding a multi-GB file takes hours on a phone. Downloading an H.264
+# version in the first place is always cheaper than converting one.
+
+set -o pipefail
+
+CRF=20                     # lower = better quality, bigger file
+PRESET=veryfast            # ultrafast is quicker and uglier
+ABITRATE=160k
+OUTSUFFIX="-compatible"
+
+C_RED=$'\e[031m'; C_GRN=$'\e[032m'; C_YEL=$'\e[033m'; C_CYN=$'\e[036m'; C_OFF=$'\e[0m'
+say() { printf '%s%s%s\n' "$2" "$1" "$C_OFF"; }
+die() { say " ✖ $1" "$C_RED"; exit "${2:-1}"; }
+
+CHECK_ONLY=0
+IN=""
+OUT=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check) CHECK_ONLY=1; shift ;;
+    -o|--output) OUT="$2"; shift 2 ;;
+    -h|--help)
+      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    -*)
+      die "Unknown option: $1"
+      ;;
+    *)
+      [ -n "$IN" ] && die "Only one input file at a time."
+      IN="$1"; shift
+      ;;
+  esac
+done
+
+[ -n "$IN" ] || die "No input file given. Try: ytd-compat video.mkv"
+[ -f "$IN" ] || die "No such file: $IN"
+
+for tool in ffmpeg ffprobe; do
+  command -v "$tool" >/dev/null 2>&1 ||
+    die "$tool is not installed. Run: pkg install -y ffmpeg"
+done
+
+probe() {  # probe <file> <select> <entries>
+  ffprobe -v error -select_streams "$2" -show_entries "stream=$3" \
+    -of default=nw=1:nk=1 "$1" 2>/dev/null | head -n 1
+}
+fmt_dur() {
+  awk -v s="$1" 'BEGIN {
+    if (s == "" || s == "NA") { print "?"; exit }
+    printf "%d:%02d:%02d", int(s / 3600), int((s % 3600) / 60), int(s % 60)
+  }'
+}
+
+VCODEC=$(probe "$IN" v:0 codec_name)
+VPIX=$(probe "$IN" v:0 pix_fmt)
+ACODEC=$(probe "$IN" a:0 codec_name)
+DUR=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$IN" 2>/dev/null | head -n 1)
+EXT="${IN##*.}"; EXT=$(printf '%s' "$EXT" | tr '[:upper:]' '[:lower:]')
+
+say " ▶ Input : $(basename "$IN")" "$C_CYN"
+say "   Video : ${VCODEC:-none} ${VPIX:+($VPIX)}" "$C_CYN"
+say "   Audio : ${ACODEC:-none}" "$C_CYN"
+say "   Length: $(fmt_dur "$DUR")" "$C_CYN"
+
+if [ "$CHECK_ONLY" = "1" ]; then
+  if [ "$VCODEC" = "h264" ] && [ "$VPIX" = "yuv420p" ] && [ "$ACODEC" = "aac" ]; then
+    say " ✔ Hardware-decodable on Android." "$C_GRN"
+  else
+    say " ✖ Not the phone-friendly combination (want h264 / yuv420p / aac)." "$C_YEL"
+  fi
+  exit 0
+fi
+
+# Already compatible: nothing to do.
+if [ "$VCODEC" = "h264" ] && [ "$VPIX" = "yuv420p" ] && [ "$ACODEC" = "aac" ] && [ "$EXT" = "mp4" ]; then
+  say " ✔ Already h264/yuv420p/aac in MP4 — nothing to convert." "$C_GRN"
+  exit 0
+fi
+
+# Right codecs, wrong container: copy the streams, no quality loss, seconds not hours.
+REMAP=0
+if [ "$VCODEC" = "h264" ] && [ "$VPIX" = "yuv420p" ] && [ "$ACODEC" = "aac" ]; then
+  REMAP=1
+fi
+
+[ -n "$OUT" ] || OUT="${IN%.*}${OUTSUFFIX}.mp4"
+if [ -e "$OUT" ]; then
+  die "Output already exists: $OUT (delete it or use -o)"
+fi
+
+IN_BYTES=$(wc -c < "$IN" 2>/dev/null || echo 0)
+FREE_KB=$(df -Pk "$(dirname "$OUT")" 2>/dev/null | awk 'NR==2 {print $4}')
+if [ -n "${FREE_KB:-}" ] && [ "$FREE_KB" -lt $(( (IN_BYTES / 1024) + 204800 )) ]; then
+  say " Warning: only $((FREE_KB / 1024)) MB free where the output is going." "$C_YEL"
+fi
+
+cleanup() {
+  if [ -n "${FF_PID:-}" ]; then
+    kill "$FF_PID" 2>/dev/null
+  fi
+  if [ -f "$OUT" ]; then
+    rm -f "$OUT"
+    say " Removed the unfinished $OUT" "$C_YEL"
+  fi
+}
+trap 'cleanup; exit 130' INT TERM
+
+echo
+if [ "$REMAP" = "1" ]; then
+  say " ▶ Codecs are already fine — remuxing the container only (fast, lossless)." "$C_GRN"
+  ARGS=(-i "$IN" -map 0:v:0 -map "0:a:0?" -c copy -movflags +faststart -map_metadata 0 "$OUT")
+else
+  say " ▶ Re-encoding to h264/yuv420p + aac. This is the slow part." "$C_YEL"
+  ARGS=(-i "$IN" -map 0:v:0 -map "0:a:0?"
+        -c:v libx264 -crf "$CRF" -preset "$PRESET" -pix_fmt yuv420p)
+  if [ "$ACODEC" = "aac" ]; then
+    ARGS+=(-c:a copy)
+  else
+    ARGS+=(-c:a aac -b:a "$ABITRATE")
+  fi
+  ARGS+=(-movflags +faststart -map_metadata 0 "$OUT")
+fi
+say "   → $OUT" "$C_CYN"
+
+ffmpeg -hide_banner -loglevel warning -stats -y "${ARGS[@]}" &
+FF_PID=$!
+wait "$FF_PID"
+RC=$?
+FF_PID=""
+trap - INT TERM
+
+echo
+if [ "$RC" -ne 0 ] || [ ! -f "$OUT" ]; then
+  [ -f "$OUT" ] && rm -f "$OUT"
+  die "ffmpeg failed (exit $RC). Nothing was written." 1
+fi
+
+# Verify the result the same way the downloader does: right codecs, same length.
+NV=$(probe "$OUT" v:0 codec_name); NP=$(probe "$OUT" v:0 pix_fmt); NA=$(probe "$OUT" a:0 codec_name)
+ND=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$OUT" 2>/dev/null | head -n 1)
+
+say " ✔ Output: $(basename "$OUT")" "$C_GRN"
+say "   Size  : $(du -h "$OUT" 2>/dev/null | cut -f1)" "$C_GRN"
+say "   Video : $NV ($NP)" "$C_GRN"
+say "   Audio : ${NA:-none}" "$C_GRN"
+
+OK=1
+[ "$NV" = "h264" ] && [ "$NP" = "yuv420p" ] || { say " ✖ Output video is not h264/yuv420p." "$C_RED"; OK=0; }
+[ -n "$NA" ] || { say " ✖ Output has no audio stream." "$C_RED"; OK=0; }
+if printf '%s' "$ND" | grep -qE '^[0-9]+(\.[0-9]+)?$' &&
+   printf '%s' "$DUR" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+  if awk -v a="$ND" -v e="$DUR" 'BEGIN { t = e * 0.01; if (t < 3) t = 3
+        exit !(((a - e) < 0 ? e - a : a - e) <= t) }'; then
+    say "   Length: $(fmt_dur "$ND") — matches the source" "$C_GRN"
+  else
+    say " ✖ Length: $(fmt_dur "$ND") but the source is $(fmt_dur "$DUR")." "$C_RED"
+    OK=0
+  fi
+fi
+
+if [ "$OK" = "1" ]; then
+  say " ✔ DONE — this file plays in hardware on Android." "$C_GRN"
+  exit 0
+fi
+die "Conversion finished but the checks failed. The output may be unusable." 5

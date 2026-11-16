@@ -39,9 +39,13 @@ fi
 cp "$SRC_DIR/termux-url-opener" "$HOME/bin/termux-url-opener"
 chmod 755 "$HOME/bin/termux-url-opener"
 
+msg "Installing ytd-compat" "$C_CYN"
+cp "$SRC_DIR/ytd-compat" "$HOME/bin/ytd-compat"
+chmod 755 "$HOME/bin/ytd-compat"
+
 msg "Verifying installation" "$C_CYN"
 FAIL=0
-for tool in yt-dlp ffmpeg; do
+for tool in yt-dlp ffmpeg ffprobe; do
   if command -v "$tool" >/dev/null 2>&1; then
     msg "  ✔ $tool found" "$C_GRN"
   else
@@ -49,12 +53,20 @@ for tool in yt-dlp ffmpeg; do
     FAIL=1
   fi
 done
-[ -x "$HOME/bin/termux-url-opener" ] && msg "  ✔ termux-url-opener installed" "$C_GRN" || FAIL=1
+for script in termux-url-opener ytd-compat; do
+  if [ -x "$HOME/bin/$script" ]; then
+    msg "  ✔ $script installed" "$C_GRN"
+  else
+    msg "  ✖ $script MISSING" "$C_RED"
+    FAIL=1
+  fi
+done
 
 echo
 if [ "$FAIL" -eq 0 ]; then
   msg "Process complete!" "$C_GRN"
   msg "Share any YouTube video to Termux, pick a quality, and it downloads." "$C_GRN"
+  msg "If a video stutters, run:  ytd-compat <file>" "$C_GRN"
   msg "To update yt-dlp later:  python -m pip install -U yt-dlp" "$C_YEL"
   exit 0
 else

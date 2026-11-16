@@ -24,6 +24,9 @@ This is a fork of [khansaad1275/Termux-YTD2.0](https://github.com/khansaad1275/T
   has both a video and an audio stream and that its length matches the source (within 1%). A merge
   that got truncated can still play for a few minutes, so `DOWNLOAD COMPLETE` used to be a guess;
   now it says `verified with ffprobe` or fails with `VERIFICATION FAILED`.
+- **`ytd-compat` for playback problems.** Converts a stuttering video to the H.264 / yuv420p /
+  AAC combination Android decodes in hardware, remuxing instead of re-encoding when the codecs are
+  already fine.
 - **Fixed the broken default branch** (`-o $path` typo), the stray `break`, unquoted variables,
   missing `--no-playlist`, and the silent overwrite of an existing `termux-url-opener`.
 
@@ -53,12 +56,46 @@ Shorts skip the menu and download at the best available quality.
 
 Every download is merged into a single file. The last log is always at `~/ytdl-last.log`.
 
+## Making a video play smoothly
+
+The best quality YouTube offers is usually AV1 or VP9, sometimes 10-bit or 4:4:4. Many Android
+players cannot hardware-decode those, so large videos stutter or play in slow motion. `ytd-compat`
+converts a file to H.264 High / yuv420p / AAC in MP4, which every Android device decodes in
+hardware:
+
+```bash
+ytd-compat video.mkv                  # writes video-compatible.mp4
+
+ytd-compat video.mkv -o fixed.mp4     # choose the output name
+
+ytd-compat --check video.mkv          # just report the codecs, change nothing
+```
+
+It is careful about the two traps in a hand-written ffmpeg command:
+
+- Without `-pix_fmt yuv420p`, ffmpeg inherits the source's chroma layout and can produce **H.264
+  High 4:4:4**, which phones do not decode. That is the usual reason a "fix" makes things worse.
+- Without an explicit video codec, ffmpeg still re-encodes the video (it only copies streams with
+  `-c copy`), so `-codec:a libmp3lame` is not an audio-only operation.
+
+If the file already has H.264 / yuv420p / AAC and only the container is wrong (mkv), `ytd-compat`
+remuxes with `-c copy` instead — lossless and seconds rather than hours. It refuses to overwrite an
+existing file, removes a half-written output if you interrupt it, and checks the result with
+ffprobe afterwards (codecs plus length against the source).
+
+Re-encoding is slow: a multi-gigabyte file can take hours on a phone and loses a little quality.
+Downloading an H.264 version in the first place is always cheaper.
+
 ## Troubleshooting
 
 **I get two files, a video and an audio file.**
 ffmpeg is missing. Run `pkg install -y ffmpeg` and check with `ffmpeg -version`. The current
 `termux-url-opener` refuses to start a download when ffmpeg is absent, so you should see a clear
 message instead of a split file.
+
+**The video stutters or plays in slow motion.**
+Run `ytd-compat --check yourfile.mp4`. If it reports anything other than `h264 (yuv420p)` / `aac`,
+run `ytd-compat yourfile.mp4` to convert it. See "Making a video play smoothly" above.
 
 **The download stopped by itself.**
 Read the last lines the script prints, or `tail -n 30 ~/ytdl-last.log`. If it says "retrying in", it
