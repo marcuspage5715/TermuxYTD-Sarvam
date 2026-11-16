@@ -105,6 +105,7 @@ if [ -n "${FREE_KB:-}" ] && [ "$FREE_KB" -lt 8000000 ]; then
 fi
 
 COMMON=(
+  --output "$FTEMPLATE"
   --no-playlist
   --retries 20
   --fragment-retries 20
@@ -153,6 +154,7 @@ verify_output() {
 
   file=$(tail -n 1 "$PATHFILE" 2>/dev/null)
   if [ -z "$file" ] || [ ! -f "$file" ]; then
+    # shellcheck disable=SC2010 # only a fallback; PATHFILE is the normal path
     newest=$(ls -t "$OUTDIR" 2>/dev/null | grep -viE '\.(part|ytdl|temp)$' | head -n 1)
     [ -n "$newest" ] && file="$OUTDIR/$newest"
   fi
@@ -211,7 +213,8 @@ verify_output() {
 # ---------- downloader ----------
 run_download() {
   local -a args=("${COMMON[@]}" "$@")
-  local -a waits=($RETRY_WAITS)
+  local -a waits
+  read -r -a waits <<< "$RETRY_WAITS"
   local rc=0 attempt=1 wait_secs start end secs total total_start fatal
   local attempt_log="$LOGFILE.attempt"
 
@@ -276,6 +279,7 @@ run_download() {
       vrc=$?
     else
       vrc=3
+      # shellcheck disable=SC2010
       newest=$(ls -t "$OUTDIR" 2>/dev/null | grep -viE '\.(part|ytdl|temp)$' | head -n 1)
       if [ -n "$newest" ]; then
         say " ✔ Saved: $newest" "$C_GRN"
