@@ -1,83 +1,198 @@
 #!/data/data/com.termux/files/usr/bin/bash
+# TERMUX-YTD 2.0 — reviewed/fixed build
+# Original by KhanSaad1275 (Saad Maqsood), MIT Licence
+# https://github.com/khansaad1275/Termux-YTD2.0
+#
+# Changes vs. the original: ffmpeg is checked for before any download, every
+# quality option actually requests that resolution, audio+video are always
+# merged, exit status is reported, and a log is kept.
 
-# TERMUX-YTD 2.0
-# BY KHAN SAAD
-# GITHUB.COM/KHANSAAD1275
+set -o pipefail
 
-# SETTINGS THAT YOU CAN CHANGE-----
+# ---------- settings you can change ----------
+OUTDIR="$HOME/storage/shared/Youtube"
+LOGFILE="$HOME/ytdl-last.log"
+TMPDIR_YT="$HOME/.cache/ytdlp"
+USE_INTERNAL_TEMP=0        # 1 = download fragments in internal storage, then move
+MERGE_FORMAT="mp4/mkv"     # mp4 if possible, mkv otherwise
+FRAGMENTS=4                # parallel fragments (raise to 8 on good Wi-Fi)
+# ----------------------------------------------
 
-fpath='/data/data/com.termux/files/home/storage/shared/Youtube/%(title)s.%(ext)s'
+FTEMPLATE="$OUTDIR/%(title).150B [%(id)s].%(ext)s"
 
-# ----------
+C_RED=$'\e[031m'; C_GRN=$'\e[032m'; C_YEL=$'\e[033m'; C_CYN=$'\e[036m'; C_OFF=$'\e[0m'
 
-#check if reel
-if [[ "$1" == *"shorts"* ]]; then
-  yt-dlp -o $fpath $1 
-  exit
+say()  { printf '%s%s%s\n' "$2" "$1" "$C_OFF"; }
+pause_exit() {
+  local code="${1:-0}"
+  echo
+  if [ "$code" -eq 0 ]; then
+    say " ✔ All done. You can close Termux." "$C_GRN"
+  else
+    say " ✖ Finished with errors (exit $code). Full log: $LOGFILE" "$C_RED"
+  fi
+  say " Press Enter to close this session…" "$C_YEL"
+  read -r _ 2>/dev/null || true
+  exit "$code"
+}
 
-else
-	echo " "
+banner() {
+  say " ▄ █   ▄▀▀▀▀▀▄   █ ▄   == Termux-YTD 2.0 ==" "$C_RED"
+  say "▄▄▀▄   █─▀─▀─█  ▄▀▄▄   With Enhanced Speed" "$C_RED"
+  say "     ▀▄▒▒▒▒▒▒▒▒▒▄▀    --------------------" "$C_RED"
+  say "     █────▀────█       github.com/khansaad1275" "$C_RED"
+  say "     █────▀────█       (reviewed build)" "$C_RED"
+  say "╔════════════════════════════════════════╗" "$C_CYN"
+  say "║ ♚ Project Name : TERMUX-YTD 2.0         ║" "$C_GRN"
+  say "║ ♚ Author : KhanSaad1275                 ║" "$C_GRN"
+  say "║ ♚ Website : www.LearnTermux.tech        ║" "$C_GRN"
+  say "╠════════════════════════════════════════╝" "$C_CYN"
+}
+
+# ---------- sanity checks ----------
+if [ "$#" -lt 1 ] || [ -z "$1" ]; then
+  say "No URL given. Share a video from YouTube to Termux." "$C_RED"
+  pause_exit 2
 fi
 
+URL="$1"
 
-echo -e "\e[031m" " ▄ █   ▄▀▀▀▀▀▄   █ ▄   == Termux-YTD 2.0 ="
-echo -e "\e[031m" "▄▄▀▄   █─▀─▀─█  ▄▀▄▄   With Enhanced Speed"
-echo -e "\e[031m" "     ▀▄▒▒▒▒▒▒▒▒▒▄▀    --------------------"
-echo -e "\e[031m" "     █────▀────█       Check out my Github"
-echo -e "\e[031m" "     █────▀────█       For More info...   "
-echo -e "\e[036m" "╔════════════════════════════════════════╗"                                                                          
-echo -e "\e[032m" "║ ♚ Project Name : 🆃🅴🆁🅼🆄🆇-🆈🆃🅳 2.0™        ║"
-echo -e "\e[032m" "║ ♚ Author : KhanSaad1275                ║"
-echo -e "\e[032m" "║ ♚ Github : g̲i̲t̲h̲u̲b̲.̲c̲o̲m̲/̲k̲h̲a̲n̲s̲a̲a̲d̲1̲2̲7̲5̲/̲    ║"
-echo -e "\e[032m" "║ ♚ Website : www.LearnTermux.tech       ║"
-echo -e "\e[036m" "╠════════════════════════════════════════╝"
-echo -e "\e[036m" "╠═▶ [𝗦𝗲𝗹𝗲𝗰𝘁 𝗔 𝗙𝗼𝗿𝗺𝗮𝘁]  ➳"
-echo -e "\e[032m" "╠═▶ 1. Music Mp3♫"
-echo -e "\e[032m" "╠═▶ 2. Video 360p"
-echo -e "\e[032m" "╠═▶ 3. Video 480p"
-echo -e "\e[032m" "╠═▶ 4. Video 720p"
-echo -e "\e[032m" "╠═▶ 5. Video 1080p"
-echo -e "\e[032m" "╠═▶ 6. Video 2160p"
-echo -e "\e[032m" "╠═▶ 7. Exit Termux-YTD" 
-echo -e "\e[032m" "╠═▶ A. About." 
-printf "\e[032m ╚═:➤ \e[0m "
-read choice
+if ! command -v yt-dlp >/dev/null 2>&1; then
+  say "yt-dlp is not installed. Run:  pkg install -y ffmpeg && pip install -U yt-dlp" "$C_RED"
+  pause_exit 127
+fi
 
+# Without ffmpeg yt-dlp CANNOT merge video+audio and silently leaves two files.
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  say "ffmpeg is missing — video and audio would be saved as two separate files." "$C_RED"
+  say "Fix it with:  pkg install -y ffmpeg" "$C_YEL"
+  say "Then run install.sh again, or install it now and press Enter to continue." "$C_YEL"
+  read -r _ 2>/dev/null || true
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    say "Still no ffmpeg. Aborting instead of producing a split file." "$C_RED"
+    pause_exit 3
+  fi
+fi
 
-case $choice in 
-	1)
-	yt-dlp -f 'bestaudio[ext=m4a]' -o $fpath $1
+mkdir -p "$OUTDIR" 2>/dev/null || {
+  say "Cannot create $OUTDIR — run 'termux-setup-storage' and allow storage." "$C_RED"
+  pause_exit 4
+}
 
- ;;
-	2)
-	yt-dlp -f "best[height<=360]" -o $fpath $1 
-	;;
+# Warn when the target filesystem is nearly full (a 4 GB video needs ~12 GB
+# while it downloads: video stream + audio stream + merged result).
+FREE_KB=$(df -Pk "$OUTDIR" 2>/dev/null | awk 'NR==2 {print $4}')
+if [ -n "${FREE_KB:-}" ] && [ "$FREE_KB" -lt 8000000 ]; then
+  say "Warning: only $((FREE_KB / 1024)) MB free in $OUTDIR." "$C_YEL"
+  say "A large video needs roughly 3x its size while merging." "$C_YEL"
+fi
 
-	3)
-	yt-dlp -f 'best[height<=480]' -o $fpath $1 
-	;;
+COMMON=(
+  --no-playlist
+  --retries 20
+  --fragment-retries 20
+  --retry-sleep 5
+  --concurrent-fragments "$FRAGMENTS"
+  --merge-output-format "$MERGE_FORMAT"
+  --newline
+)
+if [ "$USE_INTERNAL_TEMP" = "1" ]; then
+  mkdir -p "$TMPDIR_YT"
+  COMMON+=( --paths "temp:$TMPDIR_YT" )
+fi
 
-	4)
-	yt-dlp -f 'best[height<=720]' -o $fpath $1 
-	;;
+# ---------- downloader ----------
+run_download() {
+  local -a args=("${COMMON[@]}" "$@")
+  local rc start end secs
 
-	5)
-	yt-dlp -f 'best[height<=1080]' -o $fpath $1 
-	;;
+  echo
+  say " ▶ yt-dlp ${args[*]}" "$C_CYN"
+  say " ▶ saving to: $OUTDIR" "$C_CYN"
+  say " ▶ log: $LOGFILE" "$C_CYN"
+  echo
 
-	6)
-	yt-dlp -f 'best[height<=2160]' -o $fpath $1 
-	;;
+  start=$(date +%s)
+  : > "$LOGFILE"
+  yt-dlp "${args[@]}" 2>&1 | tee -a "$LOGFILE"
+  rc=${PIPESTATUS[0]}
+  end=$(date +%s)
+  secs=$((end - start))
 
-	7)
-	break
-	;;
-	
-	A|a)
-	echo "Hello this is Saad! , Termux-YTD2.0 is a light weight tool to download any kind of Video, Music or shorts from Youtube with 2 clicks on your phone using Termux. For more information and tools you can check out my github https://github.com/khansaad1275/Termux-YTD2.0. Visit my website LEARNTERMUX.TECH for more termux releted containts"
-	;;
-	
-	*)
-	yt-dlp -f 'best[height<=2160]' -o $path $1 
+  echo
+  say " ── yt-dlp exited with code $rc after ${secs}s ──" "$C_CYN"
+
+  if [ "$rc" -eq 0 ]; then
+    local newest
+    newest=$(ls -t "$OUTDIR" 2>/dev/null | head -n 1)
+    if [ -n "$newest" ]; then
+      say " ✔ Saved: $newest" "$C_GRN"
+      say "   Size : $(du -h "$OUTDIR/$newest" 2>/dev/null | cut -f1)" "$C_GRN"
+    fi
+    say " ✔ DOWNLOAD COMPLETE." "$C_GRN"
+  else
+    say " ✖ DOWNLOAD FAILED (exit $rc). Nothing was merged." "$C_RED"
+    say "   Last lines of the log:" "$C_YEL"
+    tail -n 15 "$LOGFILE" | sed 's/^/     /'
+  fi
+  return "$rc"
+}
+
+# ---------- shorts: one-click, but still merged ----------
+if [[ "$URL" == *"shorts"* ]]; then
+  run_download -f "bv*+ba/b" "$URL"
+  pause_exit $?
+fi
+
+banner
+say "╠═▶ [SELECT A FORMAT]  ➳" "$C_CYN"
+say "╠═▶ 1. Music Mp3 ♫" "$C_GRN"
+say "╠═▶ 2. Video 360p" "$C_GRN"
+say "╠═▶ 3. Video 480p" "$C_GRN"
+say "╠═▶ 4. Video 720p" "$C_GRN"
+say "╠═▶ 5. Video 1080p" "$C_GRN"
+say "╠═▶ 6. Video 1440p" "$C_GRN"
+say "╠═▶ 7. Video 2160p (4K)" "$C_GRN"
+say "╠═▶ 8. Best available" "$C_GRN"
+say "╠═▶ 9. About" "$C_GRN"
+say "╠═▶ 0. Exit Termux-YTD" "$C_GRN"
+printf '%s ╚═:➤ %s' "$C_GRN" "$C_OFF"
+read -r choice
+
+# bv*[height<=N]+ba  -> separate video+audio streams, merged by ffmpeg.
+# /b[height<=N]      -> fallback for sites that only offer combined files.
+pick_video() {
+  local h="$1"
+  run_download -f "bv*[height<=${h}]+ba/b[height<=${h}]" "$URL"
+}
+
+case "$choice" in
+  1)
+    run_download -f "ba/b" -x --audio-format mp3 --audio-quality 0 \
+      --embed-thumbnail --embed-metadata --convert-thumbnails jpg "$URL"
+    ;;
+  2) pick_video 360 ;;
+  3) pick_video 480 ;;
+  4) pick_video 720 ;;
+  5) pick_video 1080 ;;
+  6) pick_video 1440 ;;
+  7) pick_video 2160 ;;
+  8) run_download -f "bv*+ba/b" "$URL" ;;
+  9)
+    say "Termux-YTD 2.0 downloads any YouTube video, music or short with two taps." "$C_CYN"
+    say "Share a video from the YouTube app, choose Termux, then pick a quality." "$C_CYN"
+    say "Every download is written to: $OUTDIR" "$C_CYN"
+    say "Full log of the last download: $LOGFILE" "$C_CYN"
+    pause_exit 0
+    ;;
+  0)
+    say "Bye." "$C_GRN"
+    exit 0
+    ;;
+  *)
+    say "Invalid choice: '$choice'. Nothing downloaded." "$C_RED"
+    pause_exit 1
+    ;;
 esac
 
+pause_exit $?

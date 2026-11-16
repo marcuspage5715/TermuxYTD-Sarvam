@@ -1,61 +1,89 @@
-# Termux-YTD2.0
-### A light weight tool to download any kind of Video, Music or shorts from Youtube with 2 clicks on your phone using Termux.
-<hr>
+# Termux-YTD 2.0 (fixed build)
 
-Termux-YTD2.0 is a Upgraded version of Termux-YTD, Since Youtube-dl really slow know Termux-YTD is still downloading things but really slow and Termux-YTD2.0 overcomes that problem. I have added all the previous features of Termux-YTD as well as added youtube shorts support. So now while watching shorts you can just share any shorts with termux and it will download it at a lightning speed.
+A lightweight tool to download any YouTube video, music track or short with two taps on your
+phone using Termux.
 
-<p align="center">
-<img src="https://user-images.githubusercontent.com/32749921/197327887-c4aca7fc-e475-4175-a289-08af6dceb340.png">
-</p>
-  
-<p align="center">
-  <img src="https://img.shields.io/badge/Maintained%3F-Yes-green?style=for-the-badge">
-  <img src="https://img.shields.io/github/license/khansaad1275/Termux-YTD2.0?style=for-the-badge">
-  <img src="https://img.shields.io/github/issues/khansaad1275/Termux-YTD2.0?color=violet&style=for-the-badge">
-  <img src="https://img.shields.io/github/forks/khansaad1275/Termux-YTD2.0?color=teal&style=for-the-badge">
-  <img src="https://img.shields.io/github/stars/khansaad1275/Termux-YTD2.0?style=for-the-badge">
-</p>
+This is a fork of [khansaad1275/Termux-YTD2.0](https://github.com/khansaad1275/Termux-YTD2.0)
+(MIT, © 2022 Saad Maqsood) with the bugs listed in [REVIEW.md](REVIEW.md) fixed.
 
-### Me:
-Author👨‍💻: https://github.com/khansaad1275 <br>
+## What changed in this fork
 
-Website🌎: www.Learntermux.tech <br>
+- **ffmpeg is now installed and required.** Without it yt-dlp cannot merge the video and audio
+  streams and leaves you with two separate files. That was the main bug in the original.
+- **The quality menu actually delivers the resolution it promises.** The original used
+  `-f best[height<=N]`, which on YouTube can only ever return 144p, 360p or 720p. Every option now
+  uses `bv*[height<=N]+ba/b[height<=N]`, and 1440p was added.
+- **You can tell when a download is finished.** The script reports yt-dlp's exit code, prints
+  `DOWNLOAD COMPLETE` with the file name and size (or `DOWNLOAD FAILED` with the log tail), and
+  keeps a full log at `~/ytdl-last.log`.
+- **Fixed the broken default branch** (`-o $path` typo), the stray `break`, unquoted variables,
+  missing `--no-playlist`, and the silent overwrite of an existing `termux-url-opener`.
 
-Instagram : https://www.instagram.com/skhan_official/ <br>
-<br>
-<br>
+## Requirements
 
-### Installation:
+Termux, plus `python`, `ffmpeg` and `yt-dlp`. `install.sh` installs all three.
 
-```
-pkg install git 
-```
-```
-git clone https://github.com/khansaad1275/Termux-YTD2.0/
-```
-```
-cd Termux-YTD2.0
-```
-```
+## Installation
+
+```bash
+pkg install git
+git clone https://github.com/marcuspage5715/TermuxYTD-Sarvam.git
+cd TermuxYTD-Sarvam
 bash install.sh
 ```
-<br>
-<br>
 
-### Usage:
-Detaild post on How to use :https://www.learntermux.tech/2022/10/Termux-YTD2.0.html
+Allow the storage permission when the popup appears. When it finishes, `install.sh` verifies that
+`yt-dlp`, `ffmpeg` and `~/bin/termux-url-opener` are all in place.
 
-Basic Idea of Usage: <br>
-[1] While Using Youtube on your phone tap on share button of any video and and select termux. <br>
-[2] Termux will open automatically and now just select the quality of the video.<br>
-- after this the video will be downloaded automatically. if you are downloading shorts then you don't have to do 2nd step, just share it and it will be downloaded in one click.
+## Usage
 
-### Features:
-- Download Shorts
-- See The Downloading Process.
-- Download any Video in Just 2 Clicks.
-- Select the Quality Of your Video.
-- Downlaod Mp3 Version of the Video.
+1. In the YouTube app, tap Share on a video and choose **Termux**.
+2. Pick a quality from the menu.
+3. The video is written to `~/storage/shared/Youtube/`.
 
-<br>
-<br>
+Shorts skip the menu and download at the best available quality.
+
+Every download is merged into a single file. The last log is always at `~/ytdl-last.log`.
+
+## Troubleshooting
+
+**I get two files, a video and an audio file.**
+ffmpeg is missing. Run `pkg install -y ffmpeg` and check with `ffmpeg -version`. The current
+`termux-url-opener` refuses to start a download when ffmpeg is absent, so you should see a clear
+message instead of a split file.
+
+**The download dies at exactly 4 GB.**
+`~/storage/shared` is on a FAT32 volume, which cannot hold a single file larger than 4 GiB. Check
+with `mount | grep storage` — `vfat` or `fuseblk` confirms it. Download to internal storage
+instead: set `USE_INTERNAL_TEMP=1` at the top of `termux-url-opener`, which stages the fragments in
+`~/.cache/ytdlp` and moves the finished file afterwards. The final file still has to fit.
+
+**The progress bar reaches 100% and then nothing happens for minutes.**
+That is the merge step. yt-dlp hands two multi-gigabyte files to ffmpeg, which remuxes them with no
+output. It is working, not hung. On a large video this can take several minutes.
+
+**A big video fails with a disk-space or I/O error.**
+Peak usage is roughly three times the final size, because the video stream, the audio stream and
+the merged result all exist at once. Free up space first; the script warns when the target has less
+than 8 GB free.
+
+**`Requested format is not available`.**
+The video does not offer that resolution. Pick a lower one, or "Best available". Also try
+`python -m pip install -U yt-dlp` — YouTube changes break old yt-dlp versions within weeks.
+
+**`Sign in to confirm you're not a bot`.**
+YouTube is challenging the network rather than the video. Try a different connection, or pass
+cookies with `--cookies-from-browser` if you have them.
+
+## Keeping yt-dlp current
+
+`yt-dlp -U` does not work for a pip install. Use:
+
+```bash
+python -m pip install -U yt-dlp
+```
+
+## Licence
+
+MIT. Original work © 2022 Saad Maqsood
+([khansaad1275/Termux-YTD2.0](https://github.com/khansaad1275/Termux-YTD2.0)).
